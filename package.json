@@ -1,6 +1,6 @@
 {
 	"name": "swagger-to-rq",
-	"version": "1.0.2",
+	"version": "1.0.3",
 	"description": "Convert Swagger API specs into TypeScript Interfaces and TanStack Query hooks in one command.",
 	"type": "module",
 	"main": "./dist/index.js",
