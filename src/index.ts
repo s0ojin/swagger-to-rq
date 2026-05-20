@@ -8,6 +8,23 @@ import path from "path";
 import dotenv from "dotenv";
 import { execFileSync } from "child_process";
 
+// 윈도우 Git Bash 경로 왜곡 방지
+if (
+	!process.env.MSYS_NO_PATHCONV &&
+	process.platform === "win32" &&
+	(process.env.EXEPATH?.includes("Git") || process.env._?.includes("bash"))
+) {
+	try {
+		execFileSync(process.execPath, process.argv.slice(1), {
+			stdio: "inherit",
+			env: { ...process.env, MSYS_NO_PATHCONV: "1" },
+		});
+		process.exit(0);
+	} catch (e) {
+		process.exit(1);
+	}
+}
+
 dotenv.config();
 
 const program = new Command();
