@@ -32,7 +32,7 @@ const program = new Command();
 program
 	.name("gen-rq")
 	.description("Swagger 명세를 기반으로 TypeScript Interface와 TanStack Query 훅을 자동 생성합니다. (Google Gemini 엔진 탑재)")
-	.version("1.0.4");
+	.version("1.0.5");
 
 program
 	.argument("<apiPath>", "변환할 API 엔드포인트 경로 (예: /api/v1/user/search)")
