@@ -34,22 +34,39 @@ program.name("gen-rq").description("Swagger 명세를 기반으로 TypeScript In
 program
 	.argument("<apiPath>", "변환할 API 엔드포인트 경로 (예: /api/v1/user/search)")
 	.option("-s, --swagger <url>", "회사의 Swagger JSON URL 주소")
+	.option("-p, --provider <string>", "사용할 LLM 공급자 (ollama, openai, gemini)", "ollama")
+	.option("-m, --model <string>", "사용할 LLM 모델명 (예: qwen2.5-coder:7b, gpt-4o-mini 등)")
 	.option("-k, --key <string>", "LLM API Key")
+	.option("-b, --base-url <url>", "LLM API Base URL (커스텀 엔드포인트)")
 	.option("-t, --type <string>", "강제 지정 타입 선택 (query 또는 mutation)")
 	.action(async (apiPath: string, options) => {
-		const provider = process.env.LLM_PROVIDER || "ollama";
-
+		const rawProvider = options.provider || process.env.LLM_PROVIDER || "ollama";
+		const provider = rawProvider.toLowerCase();
 		const swaggerUrl = options.swagger || process.env.SWAGGER_URL;
 		const forceType = options.type;
 
-		const apiKey = provider === "ollama" ? "ollama" : options.key || process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY;
+		let apiKey = options.key;
+		let baseURL = options.baseUrl;
+		let model = options.model;
 
-		const baseURL =
-			provider === "ollama"
-				? process.env.OLLAMA_BASE_URL || "http://localhost:11434/v1"
-				: "https://generativelanguage.googleapis.com/v1beta/openai/";
-
-		const model = provider === "ollama" ? process.env.OLLAMA_MODEL || "qwen2.5-coder:7b" : "gemini-3.5-flash";
+		if (provider === "ollama") {
+			apiKey = apiKey || "ollama";
+			baseURL = baseURL || process.env.OLLAMA_BASE_URL || "http://localhost:11434/v1";
+			model = model || process.env.OLLAMA_MODEL || "qwen2.5-coder:7b";
+		} else if (provider === "openai") {
+			apiKey = apiKey || process.env.OPENAI_API_KEY;
+			baseURL = baseURL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+			model = model || process.env.OPENAI_MODEL || "gpt-4o-mini";
+		} else if (provider === "gemini") {
+			apiKey = apiKey || process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY;
+			baseURL = baseURL || process.env.GEMINI_BASE_URL || "https://generativelanguage.googleapis.com/v1beta/openai/";
+			model = model || process.env.GEMINI_MODEL || "gemini-3.5-flash";
+		} else {
+			// Custom/unknown provider fallback
+			apiKey = apiKey || process.env.LLM_API_KEY;
+			baseURL = baseURL || process.env.LLM_BASE_URL;
+			model = model || process.env.LLM_MODEL || "gpt-4o-mini";
+		}
 
 		// 수동 옵션 오타 검증
 		if (forceType && forceType !== "query" && forceType !== "mutation") {
@@ -58,7 +75,7 @@ program
 		}
 
 		if (!apiKey && provider !== "ollama") {
-			console.error("❌ 에러: API Key가 없습니다. -k 옵션을 주거나 .env를 설정하세요.");
+			console.error(`❌ 에러: ${provider.toUpperCase()} API Key가 없습니다. -k 옵션을 주거나 .env를 설정하세요.`);
 			return;
 		}
 
@@ -89,7 +106,7 @@ program
 				2,
 			);
 
-			console.log(`🤖 3. AI 엔진을 통해 TypeScript 코드 생성 중...`);
+			console.log(`🤖 3. AI 엔진을 통해 TypeScript 코드 생성 중... (${provider} - ${model})`);
 
 			const openai = new OpenAI({
 				apiKey,
@@ -178,6 +195,8 @@ ${
 
 			if (provider === "ollama") {
 				console.log(`🖥️ Local Model: ${model}`);
+			} else {
+				console.log(`🖥️ Provider: ${provider} (Model: ${model})`);
 			}
 
 			if (forceType) {
