@@ -8,6 +8,8 @@ import path from "path";
 import dotenv from "dotenv";
 import { execFileSync } from "child_process";
 import * as p from "@clack/prompts";
+import { PROMPT_FOR_MULTI } from "./prompts/promptForMulti.js";
+import { PROMPT_FOR_SINGLE } from "./prompts/promptForSingle.js";
 
 // 윈도우 Git Bash 경로 왜곡 방지
 if (
@@ -417,9 +419,13 @@ program
 						if (error.status === 429 && attempt < retries) {
 							const seconds = delay / 1000;
 							if (isInteractive) {
-								p.log.warn(`⚠️ [Rate Limit 429] 일시적으로 요청 한도에 도달했습니다. ${seconds}초 후 다시 시도합니다... (시도 ${attempt}/${retries})`);
+								p.log.warn(
+									`⚠️ [Rate Limit 429] 일시적으로 요청 한도에 도달했습니다. ${seconds}초 후 다시 시도합니다... (시도 ${attempt}/${retries})`,
+								);
 							} else {
-								console.warn(`⚠️ [Rate Limit 429] 일시적으로 요청 한도에 도달했습니다. ${seconds}초 후 다시 시도합니다... (시도 ${attempt}/${retries})`);
+								console.warn(
+									`⚠️ [Rate Limit 429] 일시적으로 요청 한도에 도달했습니다. ${seconds}초 후 다시 시도합니다... (시도 ${attempt}/${retries})`,
+								);
 							}
 							await new Promise((resolve) => setTimeout(resolve, delay));
 							continue;
@@ -434,203 +440,186 @@ program
 				baseURL: baseURLVal,
 			});
 
-			const systemPrompt = `
-당신은 고도로 숙련된 프론트엔드 아키텍트이자 TypeScript 전문가입니다. 
-제공된 백엔드 Swagger API 명세를 분석하여, 프로젝트에 바로 쓸 수 있는 완벽한 TypeScript Interface와 TanStack Query(React Query v5) 커스텀 훅을 생성하세요.
-
-[★핵심 규칙: 사내 POST 통일 인프라 환경 대응★]
-이 회사의 백엔드 시스템은 보안 및 기술 컨벤션상 모든 API 요청을 HTTP 'POST' 메서드로 처리합니다. 
-따라서 단순히 HTTP Method가 POST라는 이유로 useMutation을 생성하면 안 됩니다. 당신은 'Endpoint 경로(URL)'와 'Summary/Description(설명)'의 문맥을 분석하여 Query와 Mutation을 정교하게 판별해야 합니다.
-
-1. 'useQuery'를 생성해야 하는 문맥 가이드라인:
-   - API 경로 이름이나 설명(summary/description)에 데이터 조회 성격의 단어가 있다면 반드시 'useQuery' 훅으로 생성하세요.
-     (예: get, fetch, list, detail, info, search, check, select, view, '조회', '상세', '리스트', '내역')
-   - 단, 실제 네트워크 요청 코드는 백엔드 스펙에 맞게 'axiosInstance.post' 메서드를 유지해야 합니다.
-
-2. 'useMutation'을 생성해야 하는 문맥 가이드라인:
-   - API 경로 이름이나 설명에 데이터 변경(서버 상태 조작) 성격의 단어가 있다면 'useMutation' 훅으로 생성하세요.
-     (예: create, add, update, modify, delete, remove, save, upload, cancel, '등록', '수정', '삭제', '업로드', '취소')
-
-[TypeScript 타입 지정 규칙]
-1. 절대 'any' 타입을 사용하지 마세요. 모든 필드는 명확한 타입(string, number, boolean, 혹은 하위 interface)으로 정의되어야 합니다.
-2. API 응답 및 요청 데이터 구조가 중첩 객체(Nested Object)나 배열인 경우, 하위 interface를 명확히 분리하여 정의하세요.
-
-[출력 포맷 가이드]
-- 마크다운 블록(\`\`\`typescript ... \`\`\`)을 절대로 포함하지 마세요.
-- 오직 컴파일이 바로 가능한 순수한 TypeScript 코드만 리턴하세요. 설명이나 주석은 일절 금지합니다.
-`;
+			const systemPrompt = PROMPT_FOR_SINGLE;
 
 			let successCount = 0;
 			let failCount = 0;
 
+			// 도메인 추출 헬퍼 함수
+			const getDomainFromPath = (pathStr: string): string => {
+				const segments = pathStr.split("/").filter(Boolean);
+				const vIndex = segments.findIndex(seg => /^v\d+$/.test(seg));
+				let domain = "common";
+				if (vIndex !== -1 && segments[vIndex + 1]) {
+					domain = segments[vIndex + 1];
+				} else if (segments.length > 0) {
+					domain = segments[0];
+				}
+				if (domain === "login") {
+					domain = "auth";
+				}
+				return domain;
+			};
+
 			if (options.all) {
-				// --all 옵션: 여러 개의 API를 청크 단위(최대 10개)로 묶어 한 번의 AI 호출로 일괄 생성 (속도 대폭 향상)
-				const chunkSize = 10;
-				const chunks: string[][] = [];
-				for (let i = 0; i < pathsToProcess.length; i += chunkSize) {
-					chunks.push(pathsToProcess.slice(i, i + chunkSize));
+				// 도메인별 그룹핑
+				const domainGroups: Record<string, string[]> = {};
+				for (const p of pathsToProcess) {
+					const domain = getDomainFromPath(p);
+					if (!domainGroups[domain]) {
+						domainGroups[domain] = [];
+					}
+					domainGroups[domain].push(p);
 				}
 
-				const systemPromptForMulti = `
-당신은 고도로 숙련된 프론트엔드 아키텍트이자 TypeScript 전문가입니다. 
-제공된 복수의 백엔드 Swagger API 명세들을 분석하여, 각각에 대응하는 TypeScript Interface와 TanStack Query(React Query v5) 커스텀 훅을 생성하세요.
+				const domainList = Object.keys(domainGroups);
 
-[★출력 규격: 다중 파일 리턴 방식★]
-당신은 여러 개의 파일을 동시에 생성해야 합니다. 각 파일의 시작과 끝은 반드시 아래 마커(구분자)로 완벽히 감싸서 출력하세요. 마커 외의 설명이나 주석, 마크다운 기호(\`\`\`)는 일절 금지합니다.
-
---- FILE_START: [파일명] ---
-[순수 TypeScript 코드 내용]
---- FILE_END ---
-
-예시:
---- FILE_START: useGetUser.ts ---
-export interface ...
---- FILE_END ---
---- FILE_START: usePostUpdate.ts ---
-...
---- FILE_END ---
-
-[★핵심 규칙: 사내 POST 통일 인프라 환경 대응★]
-이 회사의 백엔드 시스템은 보안 및 기술 컨벤션상 모든 API 요청을 HTTP 'POST' 메서드로 처리합니다. 
-따라서 단순히 HTTP Method가 POST라는 이유로 useMutation을 생성하면 안 됩니다. 당신은 'Endpoint 경로(URL)'와 'Summary/Description(설명)'의 문맥을 분석하여 Query와 Mutation을 정교하게 판별해야 합니다.
-
-1. 'useQuery'를 생성해야 하는 문맥 가이드라인:
-   - API 경로 이름이나 설명(summary/description)에 데이터 조회 성격의 단어가 있다면 반드시 'useQuery' 훅으로 생성하세요.
-     (예: get, fetch, list, detail, info, search, check, select, view, '조회', '상세', '리스트', '내역')
-   - 단, 실제 네트워크 요청 코드는 백엔드 스펙에 맞게 'axiosInstance.post' 메서드를 유지해야 합니다.
-
-2. 'useMutation'을 생성해야 하는 문맥 가이드라인:
-   - API 경로 이름이나 설명에 데이터 변경(서버 상태 조작) 성격의 단어가 있다면 'useMutation' 훅으로 생성하세요.
-     (예: create, add, update, modify, delete, remove, save, upload, cancel, '등록', '수정', '삭제', '업로드', '취소')
-
-[TypeScript 타입 지정 규칙]
-1. 절대 'any' 타입을 사용하지 마세요. 모든 필드는 명확한 타입(string, number, boolean, 혹은 하위 interface)으로 정의되어야 합니다.
-2. API 응답 및 요청 데이터 구조가 중첩 객체(Nested Object)나 배열인 경우, 하위 interface를 명확히 분리하여 정의하세요.
-`;
-
-				for (let c = 0; c < chunks.length; c++) {
-					const chunk = chunks[c];
-					const chunkSpecs: Record<string, any> = {};
-					for (const p of chunk) {
-						chunkSpecs[p] = swaggerJson.paths?.[p];
-					}
-
-					const progressPrefix = `[그룹 ${c + 1}/${chunks.length}]`;
-					if (isInteractive) {
-						p.log.step(`${progressPrefix} 🔍 API ${chunk.length}개 명세 분석 중...`);
-					} else {
-						console.log(`${progressPrefix} 🔍 API ${chunk.length}개 명세 분석 중...`);
-					}
-
-					const userPrompt = `
-다음 복수의 Swagger API 명세들을 바탕으로 각 API별 파일 코드를 생성해줘. 각 API에 대한 파일명은 경로의 마지막 단어를 활용해 'use[이름].ts' 형태로 정의해줘:
-${JSON.stringify(chunkSpecs, null, 2)}
-
-${
-	forceTypeVal
-		? `[🚨 개발자 수동 강제 사항]: 이 API들은 문맥 분석 결과를 무시하고, 무조건 TanStack Query의 'use${
-				forceTypeVal.charAt(0).toUpperCase() + forceTypeVal.slice(1)
-			}' 형태로 코드를 생성해야 합니다.`
-		: ""
-}
-`;
-
-					let generatedCode;
-					const makeRequest = () => openai.chat.completions.create({
-						model: modelVal!,
-						messages: [
-							{ role: "system", content: systemPromptForMulti },
-							{ role: "user", content: userPrompt },
-						],
-						temperature: 0.1,
-					});
-
-					if (isInteractive) {
-						const s = p.spinner();
-						s.start(`🤖 AI 엔진을 통해 일괄 코드 생성 중... (${providerVal} - ${modelVal})`);
-						try {
-							const response = await callWithRetry(makeRequest);
-							generatedCode = response.choices[0].message?.content;
-							s.stop(`🤖 AI 코드 일괄 생성 완료!`);
-						} catch (error: any) {
-							s.stop(`❌ AI 코드 일괄 생성 실패!`);
-							p.log.error(`에러 내용: ${error.message}`);
-							failCount += chunk.length;
-							continue;
-						}
-					} else {
-						console.log(`🤖 AI 엔진을 통해 일괄 코드 생성 중... (${providerVal} - ${modelVal})`);
-						try {
-							const response = await callWithRetry(makeRequest);
-							generatedCode = response.choices[0].message?.content;
-						} catch (error: any) {
-							console.error(`❌ AI 코드 일괄 생성 실패! 에러 내용: ${error.message}`);
-							failCount += chunk.length;
-							continue;
-						}
-					}
-
-					if (!generatedCode) {
-						const errorMsg = "❌ 에러: AI가 코드를 생성하는 데 실패했습니다.";
-						if (isInteractive) {
-							p.log.error(errorMsg);
-						} else {
-							console.error(errorMsg);
-						}
-						failCount += chunk.length;
-						continue;
-					}
-
-					// 파일별 파싱 및 쓰기
-					const fileRegex = /--- FILE_START:\s*([\w\-]+\.ts|[\w\-]+)\s*---\r?\n([\s\S]*?)--- FILE_END ---/g;
-					let match;
-					let extractedCount = 0;
+				// --all 옵션: 도메인별로 묶어 처리
+				for (const domain of domainList) {
+					const domainPaths = domainGroups[domain];
 					
-					const targetDir = path.join(process.cwd(), "src", "hooks", "queries");
-					if (!fs.existsSync(targetDir)) {
-						fs.mkdirSync(targetDir, { recursive: true });
+					// 도메인 내 경로들을 10개씩 청크 분할
+					const chunkSize = 10;
+					const chunks: string[][] = [];
+					for (let i = 0; i < domainPaths.length; i += chunkSize) {
+						chunks.push(domainPaths.slice(i, i + chunkSize));
 					}
 
-					while ((match = fileRegex.exec(generatedCode)) !== null) {
-						let fileName = match[1].trim();
-						if (!fileName.endsWith(".ts")) {
-							fileName += ".ts";
+					for (let c = 0; c < chunks.length; c++) {
+						const chunk = chunks[c];
+						const chunkSpecs: Record<string, any> = {};
+						for (const p of chunk) {
+							chunkSpecs[p] = swaggerJson.paths?.[p];
 						}
-						const fileCode = match[2]
-							.replace(/```typescript/g, "")
-							.replace(/```/g, "")
-							.trim();
 
-						const filePath = path.join(targetDir, fileName);
-						fs.writeFileSync(filePath, fileCode, "utf8");
-						successCount++;
-						extractedCount++;
+						const progressPrefix = `[도메인: ${domain}] [그룹 ${c + 1}/${chunks.length}]`;
+						if (isInteractive) {
+							p.log.step(`${progressPrefix} 🔍 API ${chunk.length}개 명세 분석 중...`);
+						} else {
+							console.log(`${progressPrefix} 🔍 API ${chunk.length}개 명세 분석 중...`);
+						}
+
+						// 기존 파일 로드 (병합용)
+						const targetApisPath = path.join(process.cwd(), "src", "apis", `${domain}.ts`);
+						const targetModelsPath = path.join(process.cwd(), "src", "models", `${domain}.ts`);
+
+						let existingApisCode = "";
+						let existingModelsCode = "";
+						if (fs.existsSync(targetApisPath)) {
+							existingApisCode = fs.readFileSync(targetApisPath, "utf8");
+						}
+						if (fs.existsSync(targetModelsPath)) {
+							existingModelsCode = fs.readFileSync(targetModelsPath, "utf8");
+						}
+
+						const systemPromptForMulti = PROMPT_FOR_MULTI;
+
+						const userPrompt = `
+다음 복수의 Swagger API 명세들을 바탕으로 모델/타입 파일(models)과 API 요청 파일(apis)을 생성하거나 기존 파일에 추가해줘.
+도메인 명칭은 '${domain}' 입니다.
+
+${existingModelsCode ? `[기존 models/${domain}.ts 내용]\n이 타입들을 삭제하지 말고 그대로 유지하면서 새로운 API의 Payload/Response 타입들을 추가해줘:\n${existingModelsCode}\n` : ""}
+${existingApisCode ? `[기존 apis/${domain}.ts 내용]\n이 기존 메소드들과 임포트문들을 삭제하지 말고 그대로 유지하며 새 API 메소드들을 추가해줘:\n${existingApisCode}\n` : ""}
+
+[새로 생성/추가해야 할 Swagger API 명세]
+${JSON.stringify(chunkSpecs, null, 2)}
+`;
+
+						let generatedCode;
+						const makeRequest = () =>
+							openai.chat.completions.create({
+								model: modelVal!,
+								messages: [
+									{ role: "system", content: systemPromptForMulti },
+									{ role: "user", content: userPrompt },
+								],
+								temperature: 0.1,
+							});
 
 						if (isInteractive) {
-							p.log.success(`✨ 파일 생성 성공: ${fileName}`);
+							const s = p.spinner();
+							s.start(`🤖 AI 엔진을 통해 일괄 코드 생성 중... (${providerVal} - ${modelVal})`);
+							try {
+								const response = await callWithRetry(makeRequest);
+								generatedCode = response.choices[0].message?.content;
+								s.stop(`🤖 AI 코드 일괄 생성 완료!`);
+							} catch (error: any) {
+								s.stop(`❌ AI 코드 일괄 생성 실패!`);
+								p.log.error(`에러 내용: ${error.message}`);
+								failCount += chunk.length;
+								continue;
+							}
 						} else {
-							console.log(`✨ 파일 생성 성공: ${fileName}`);
+							console.log(`🤖 AI 엔진을 통해 일괄 코드 생성 중... (${providerVal} - ${modelVal})`);
+							try {
+								const response = await callWithRetry(makeRequest);
+								generatedCode = response.choices[0].message?.content;
+							} catch (error: any) {
+								console.error(`❌ AI 코드 일괄 생성 실패! 에러 내용: ${error.message}`);
+								failCount += chunk.length;
+								continue;
+							}
 						}
-					}
 
-					const missedCount = chunk.length - extractedCount;
-					if (missedCount > 0) {
-						failCount += missedCount;
-						if (isInteractive) {
-							p.log.warn(`⚠️ 명세 개수(${chunk.length}개) 대비 실제 생성된 파일(${extractedCount}개)이 일치하지 않습니다.`);
-						} else {
-							console.warn(`⚠️ 명세 개수(${chunk.length}개) 대비 실제 생성된 파일(${extractedCount}개)이 일치하지 않습니다.`);
+						if (!generatedCode) {
+							const errorMsg = "❌ 에러: AI가 코드를 생성하는 데 실패했습니다.";
+							if (isInteractive) {
+								p.log.error(errorMsg);
+							} else {
+								console.error(errorMsg);
+							}
+							failCount += chunk.length;
+							continue;
 						}
-					}
 
-					if (c < chunks.length - 1) {
-						// 연속적인 AI 그룹 호출을 방지하기 위한 안전 대기 딜레이
-						await new Promise((resolve) => setTimeout(resolve, 2000));
+						// 파일별 파싱 및 쓰기
+						const fileRegex = /--- FILE_START:\s*(models\/[\w\-]+\.ts|apis\/[\w\-]+\.ts)\s*---\r?\n([\s\S]*?)--- FILE_END ---/g;
+						let match;
+						let extractedCount = 0;
+						
+						const apisDir = path.join(process.cwd(), "src", "apis");
+						const modelsDir = path.join(process.cwd(), "src", "models");
+						if (!fs.existsSync(apisDir)) fs.mkdirSync(apisDir, { recursive: true });
+						if (!fs.existsSync(modelsDir)) fs.mkdirSync(modelsDir, { recursive: true });
+
+						while ((match = fileRegex.exec(generatedCode)) !== null) {
+							const relativePath = match[1].trim(); // e.g. "models/settlement.ts" or "apis/settlement.ts"
+							const fileCode = match[2]
+								.replace(/```typescript/g, "")
+								.replace(/```/g, "")
+								.trim();
+
+							const fullPath = path.join(process.cwd(), "src", relativePath);
+							fs.writeFileSync(fullPath, fileCode, "utf8");
+							successCount++;
+							extractedCount++;
+
+							if (isInteractive) {
+								p.log.success(`✨ 파일 생성/업데이트 성공: ${relativePath}`);
+							} else {
+								console.log(`✨ 파일 생성/업데이트 성공: ${relativePath}`);
+							}
+						}
+
+						if (extractedCount === 0) {
+							failCount += chunk.length;
+							if (isInteractive) {
+								p.log.warn(`⚠️ 생성된 마커 포맷을 파싱할 수 없습니다. 출력 코드를 다시 확인하세요.`);
+							} else {
+								console.warn(`⚠️ 생성된 마커 포맷을 파싱할 수 없습니다. 출력 코드를 다시 확인하세요.`);
+							}
+						}
+
+						if (c < chunks.length - 1 || domain !== domainList[domainList.length - 1]) {
+							// 연속적인 AI 그룹 호출을 방지하기 위한 안전 대기 딜레이
+							await new Promise((resolve) => setTimeout(resolve, 2000));
+						}
 					}
 				}
 			} else {
-				// 단일 API 처리 모드: 기존의 검증된 1:1 전송 및 생성 메커니즘 고수
+				// 단일 API 처리 모드
 				const currentPath = pathsToProcess[0];
+				const domain = getDomainFromPath(currentPath);
 
 				if (isInteractive) {
 					p.log.step(`🔍 API 경로 [${currentPath}] 탐색 및 명세 추출 중...`);
@@ -659,28 +648,39 @@ ${
 					2,
 				);
 
-				const userPrompt = `
-다음 Swagger API 명세를 바탕으로 코드를 생성해줘:
-${targetedSpec}
+				const targetApisPath = path.join(process.cwd(), "src", "apis", `${domain}.ts`);
+				const targetModelsPath = path.join(process.cwd(), "src", "models", `${domain}.ts`);
 
-${
-	forceTypeVal
-		? `[🚨 개발자 수동 강제 사항]: 이 API는 문맥 분석 결과를 무시하고, 무조건 TanStack Query의 'use${
-				forceTypeVal.charAt(0).toUpperCase() + forceTypeVal.slice(1)
-			}' 형태로 코드를 생성해야 합니다.`
-		: ""
-}
+				let existingApisCode = "";
+				let existingModelsCode = "";
+				if (fs.existsSync(targetApisPath)) {
+					existingApisCode = fs.readFileSync(targetApisPath, "utf8");
+				}
+				if (fs.existsSync(targetModelsPath)) {
+					existingModelsCode = fs.readFileSync(targetModelsPath, "utf8");
+				}
+
+				const userPrompt = `
+다음 Swagger API 명세를 바탕으로 모델/타입 파일(models)과 API 요청 파일(apis)을 생성하거나 기존 파일에 추가해줘.
+도메인 명칭은 '${domain}' 입니다.
+
+${existingModelsCode ? `[기존 models/${domain}.ts 내용]\n이 타입들을 삭제하지 말고 그대로 유지하면서 새로운 API의 Payload/Response 타입들을 추가해줘:\n${existingModelsCode}\n` : ""}
+${existingApisCode ? `[기존 apis/${domain}.ts 내용]\n이 기존 메소드들과 임포트문들을 삭제하지 말고 그대로 유지하며 새 API 메소드들을 추가해줘:\n${existingApisCode}\n` : ""}
+
+[새로 생성/추가해야 할 Swagger API 명세]
+${targetedSpec}
 `;
 
 				let generatedCode;
-				const makeRequest = () => openai.chat.completions.create({
-					model: modelVal!,
-					messages: [
-						{ role: "system", content: systemPrompt },
-						{ role: "user", content: userPrompt },
-					],
-					temperature: 0.1,
-				});
+				const makeRequest = () =>
+					openai.chat.completions.create({
+						model: modelVal!,
+						messages: [
+							{ role: "system", content: systemPrompt },
+							{ role: "user", content: userPrompt },
+						],
+						temperature: 0.1,
+					});
 
 				if (isInteractive) {
 					const s = p.spinner();
@@ -715,33 +715,46 @@ ${
 					return;
 				}
 
-				const cleanedCode = generatedCode
-					.replace(/```typescript/g, "")
-					.replace(/```/g, "")
-					.trim();
+				// 파일별 파싱 및 쓰기
+				const fileRegex = /--- FILE_START:\s*(models\/[\w\-]+\.ts|apis\/[\w\-]+\.ts)\s*---\r?\n([\s\S]*?)--- FILE_END ---/g;
+				let match;
+				let extractedCount = 0;
 
-				const segments = currentPath.split("/").filter(Boolean);
-				const lastSegment = segments[segments.length - 1] || "Api";
+				const apisDir = path.join(process.cwd(), "src", "apis");
+				const modelsDir = path.join(process.cwd(), "src", "models");
+				if (!fs.existsSync(apisDir)) fs.mkdirSync(apisDir, { recursive: true });
+				if (!fs.existsSync(modelsDir)) fs.mkdirSync(modelsDir, { recursive: true });
 
-				const fileName = `use${lastSegment.charAt(0).toUpperCase() + lastSegment.slice(1)}`;
+				while ((match = fileRegex.exec(generatedCode)) !== null) {
+					const relativePath = match[1].trim(); // e.g. "models/settlement.ts" or "apis/settlement.ts"
+					const fileCode = match[2]
+						.replace(/```typescript/g, "")
+						.replace(/```/g, "")
+						.trim();
 
-				const targetDir = path.join(process.cwd(), "src", "hooks", "queries");
+					const fullPath = path.join(process.cwd(), "src", relativePath);
+					fs.writeFileSync(fullPath, fileCode, "utf8");
+					extractedCount++;
 
-				if (!fs.existsSync(targetDir)) {
-					fs.mkdirSync(targetDir, { recursive: true });
+					if (isInteractive) {
+						p.log.success(`✨ 파일 저장 성공: src/${relativePath}`);
+					} else {
+						console.log(`✨ 파일 저장 성공: src/${relativePath}`);
+					}
 				}
 
-				const filePath = path.join(targetDir, `${fileName}.ts`);
-
-				fs.writeFileSync(filePath, cleanedCode, "utf8");
+				if (extractedCount === 0) {
+					const errorMsg = "❌ 에러: AI 답변에서 파일 구분 마커를 파싱하지 못했습니다.";
+					if (isInteractive) {
+						p.cancel(errorMsg);
+					} else {
+						console.error(errorMsg);
+					}
+					return;
+				}
 
 				if (isInteractive) {
-					p.log.success(`✨ 성공! TypeScript Interface와 Query 훅 파일이 생성되었습니다.`);
-					p.log.message(`📁 파일 생성 위치: ${filePath}`);
 					p.outro(`🎉 모든 작업이 성공적으로 완료되었습니다!`);
-				} else {
-					console.log(`\n✨ 성공! TypeScript Interface와 Query 훅 파일이 생성되었습니다.`);
-					console.log(`📁 파일 생성 위치: ${filePath}`);
 				}
 			}
 
