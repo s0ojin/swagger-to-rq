@@ -30,6 +30,156 @@ if (
 
 dotenv.config();
 
+// 1. 기존 타입 파일에서 타입/인터페이스 이름 목록을 추출하는 헬퍼 함수
+function getTypeNamesFromCode(code: string): string[] {
+	if (!code) return [];
+	const names: string[] = [];
+	const interfaceRegex = /export\s+interface\s+(\w+)\b/g;
+	const typeRegex = /export\s+type\s+(\w+)\b/g;
+	let match;
+	while ((match = interfaceRegex.exec(code)) !== null) {
+		names.push(match[1]);
+	}
+	while ((match = typeRegex.exec(code)) !== null) {
+		names.push(match[1]);
+	}
+	return Array.from(new Set(names));
+}
+
+// 2. 특정 선언(interface, type, const 등)을 중괄호 쌍을 완벽히 매칭하여 제거해주는 헬퍼
+function removeDeclaration(body: string, keyword: string, name: string): string {
+	const regex = new RegExp(`export\\s+(?:async\\s+)?${keyword}\\s+${name}\\b`);
+	const match = body.match(regex);
+	if (!match) return body;
+
+	const startIndex = match.index!;
+	let openBraces = 0;
+	let endIndex = -1;
+	let hasBracedStarted = false;
+
+	for (let i = startIndex; i < body.length; i++) {
+		if (body[i] === "{") {
+			openBraces++;
+			hasBracedStarted = true;
+		} else if (body[i] === "}") {
+			openBraces--;
+			if (hasBracedStarted && openBraces === 0) {
+				endIndex = i + 1;
+				break;
+			}
+		}
+		// 중괄호 없이 한 줄로 정의된 타입/상수 대응 (예: type A = string;)
+		if (!hasBracedStarted && body[i] === ";" && openBraces === 0) {
+			endIndex = i + 1;
+			break;
+		}
+	}
+
+	if (endIndex !== -1) {
+		return body.substring(0, startIndex) + body.substring(endIndex);
+	}
+	return body;
+}
+
+// 3. Import 구문을 추출하고 본문과 분리하는 함수
+function extractImports(code: string): { imports: { path: string; members: string[]; isType: boolean }[]; body: string } {
+	const importRegex = /import\s+([\s\S]*?)\s+from\s+['"](.*?)['"];?/g;
+	const imports: { path: string; members: string[]; isType: boolean }[] = [];
+	let body = code;
+
+	let match;
+	const matches: string[] = [];
+	while ((match = importRegex.exec(code)) !== null) {
+		matches.push(match[0]);
+		const importClause = match[1].trim();
+		const importPath = match[2].trim();
+
+		const isType = importClause.startsWith("type") || code.substring(match.index, match.index + match[0].length).includes("import type");
+
+		// { A, B } 형태 파싱
+		const memberMatch = importClause.match(/\{([\s\S]*?)\}/);
+		if (memberMatch) {
+			const members = memberMatch[1].split(",").map(m => m.trim()).filter(Boolean);
+			imports.push({ path: importPath, members, isType });
+		}
+	}
+
+	for (const m of matches) {
+		body = body.replace(m, "");
+	}
+
+	return { imports, body: body.trim() };
+}
+
+// 4. 모아진 Import 정보들을 중복 제거 및 경로별 정렬하여 한 줄씩 생성
+function mergeImports(
+	existingImports: { path: string; members: string[]; isType: boolean }[],
+	newImports: { path: string; members: string[]; isType: boolean }[]
+): string {
+	const merged: Record<string, { typeMembers: Set<string>; valueMembers: Set<string> }> = {};
+
+	const addImport = (imp: { path: string; members: string[]; isType: boolean }) => {
+		if (!merged[imp.path]) {
+			merged[imp.path] = { typeMembers: new Set(), valueMembers: new Set() };
+		}
+		imp.members.forEach(m => {
+			if (imp.isType) {
+				merged[imp.path].typeMembers.add(m);
+			} else {
+				merged[imp.path].valueMembers.add(m);
+			}
+		});
+	};
+
+	existingImports.forEach(addImport);
+	newImports.forEach(addImport);
+
+	const lines: string[] = [];
+	for (const [pathStr, data] of Object.entries(merged)) {
+		if (data.typeMembers.size > 0) {
+			const sortedMembers = Array.from(data.typeMembers).sort();
+			lines.push(`import type { ${sortedMembers.join(", ")} } from '${pathStr}';`);
+		}
+		if (data.valueMembers.size > 0) {
+			const sortedMembers = Array.from(data.valueMembers).sort();
+			lines.push(`import { ${sortedMembers.join(", ")} } from '${pathStr}';`);
+		}
+	}
+
+	return lines.join("\n");
+}
+
+// 5. 최종 스마트 병합 API
+function mergeTypeScriptCode(existingCode: string, newCode: string): string {
+	if (!existingCode) return newCode;
+	if (!newCode) return existingCode;
+
+	const existingParsed = extractImports(existingCode);
+	const newParsed = extractImports(newCode);
+
+	const mergedImportsStr = mergeImports(existingParsed.imports, newParsed.imports);
+
+	let mergedBody = existingParsed.body;
+
+	const interfaceRegex = /export\s+interface\s+(\w+)\b/g;
+	let match;
+	while ((match = interfaceRegex.exec(newParsed.body)) !== null) {
+		mergedBody = removeDeclaration(mergedBody, "interface", match[1]);
+	}
+
+	const typeRegex = /export\s+type\s+(\w+)\b/g;
+	while ((match = typeRegex.exec(newParsed.body)) !== null) {
+		mergedBody = removeDeclaration(mergedBody, "type", match[1]);
+	}
+
+	const constRegex = /export\s+const\s+(\w+)\b/g;
+	while ((match = constRegex.exec(newParsed.body)) !== null) {
+		mergedBody = removeDeclaration(mergedBody, "const", match[1]);
+	}
+
+	return `${mergedImportsStr}\n\n${mergedBody.trim()}\n\n${newParsed.body.trim()}`;
+}
+
 const program = new Command();
 
 program.name("gen-rq").description("Swagger 명세를 기반으로 TypeScript Interface와 TanStack Query 훅을 자동 생성합니다.").version("1.1.0");
@@ -411,20 +561,38 @@ program
 				return;
 			}
 
-			const callWithRetry = async (fn: () => Promise<any>, retries = 3, delay = 5000) => {
+			// LLM 공급자별 스마트 딜레이 정책 수립 (무료 제미나이 RPM 극복 목적)
+			let domainDelayMs = 2000;
+			let retryDelayMs = 5000;
+
+			const provider = providerVal.toLowerCase();
+			if (provider === "ollama") {
+				domainDelayMs = 100; // 로컬 Ollama는 속도 최우선
+				retryDelayMs = 1000;
+			} else if (provider === "gemini") {
+				domainDelayMs = 6000; // Gemini 무료 티어 15 RPM 극복을 위해 6초 대기
+				retryDelayMs = 15000; // 429/503 발생 시 15초 대기 후 리셋 유도
+			} else {
+				domainDelayMs = 1500; // OpenAI 및 기타 유료 API 기본 지연
+				retryDelayMs = 5000;
+			}
+
+			const callWithRetry = async (fn: () => Promise<any>, retries = 3, delay = retryDelayMs) => {
 				for (let attempt = 1; attempt <= retries; attempt++) {
 					try {
 						return await fn();
 					} catch (error: any) {
-						if (error.status === 429 && attempt < retries) {
+						const isRetryable = (error.status === 429 || error.status === 503) && attempt < retries;
+						if (isRetryable) {
 							const seconds = delay / 1000;
+							const statusMsg = `Rate Limit ${error.status}`;
 							if (isInteractive) {
 								p.log.warn(
-									`⚠️ [Rate Limit 429] 일시적으로 요청 한도에 도달했습니다. ${seconds}초 후 다시 시도합니다... (시도 ${attempt}/${retries})`,
+									`⚠️ [${statusMsg}] 일시적으로 요청 한도에 도달했습니다. ${seconds}초 후 다시 시도합니다... (시도 ${attempt}/${retries})`,
 								);
 							} else {
 								console.warn(
-									`⚠️ [Rate Limit 429] 일시적으로 요청 한도에 도달했습니다. ${seconds}초 후 다시 시도합니다... (시도 ${attempt}/${retries})`,
+									`⚠️ [${statusMsg}] 일시적으로 요청 한도에 도달했습니다. ${seconds}초 후 다시 시도합니다... (시도 ${attempt}/${retries})`,
 								);
 							}
 							await new Promise((resolve) => setTimeout(resolve, delay));
@@ -474,146 +642,174 @@ program
 
 				const domainList = Object.keys(domainGroups);
 
-				// --all 옵션: 도메인별로 묶어 처리
+				// --all 옵션: 각 도메인 전체를 단 한 번의 AI 호출로 생성 (속도 극대화, 누적 토큰 폭발 원천 차단)
 				for (const domain of domainList) {
 					const domainPaths = domainGroups[domain];
-					
-					// 도메인 내 경로들을 10개씩 청크 분할
-					const chunkSize = 10;
-					const chunks: string[][] = [];
-					for (let i = 0; i < domainPaths.length; i += chunkSize) {
-						chunks.push(domainPaths.slice(i, i + chunkSize));
+					const domainSpecs: Record<string, any> = {};
+					for (const p of domainPaths) {
+						domainSpecs[p] = swaggerJson.paths?.[p];
 					}
 
-					for (let c = 0; c < chunks.length; c++) {
-						const chunk = chunks[c];
-						const chunkSpecs: Record<string, any> = {};
-						for (const p of chunk) {
-							chunkSpecs[p] = swaggerJson.paths?.[p];
-						}
+					const progressPrefix = `[도메인: ${domain}]`;
+					if (isInteractive) {
+						p.log.step(`${progressPrefix} 🔍 API ${domainPaths.length}개 명세 분석 중...`);
+					} else {
+						console.log(`${progressPrefix} 🔍 API ${domainPaths.length}개 명세 분석 중...`);
+					}
 
-						const progressPrefix = `[도메인: ${domain}] [그룹 ${c + 1}/${chunks.length}]`;
-						if (isInteractive) {
-							p.log.step(`${progressPrefix} 🔍 API ${chunk.length}개 명세 분석 중...`);
-						} else {
-							console.log(`${progressPrefix} 🔍 API ${chunk.length}개 명세 분석 중...`);
-						}
+					// 기존 파일 로드 (병합용)
+					const targetApisPath = path.join(process.cwd(), "src", "apis", `${domain}.ts`);
+					const targetModelsPath = path.join(process.cwd(), "src", "models", `${domain}.ts`);
 
-						// 기존 파일 로드 (병합용)
-						const targetApisPath = path.join(process.cwd(), "src", "apis", `${domain}.ts`);
-						const targetModelsPath = path.join(process.cwd(), "src", "models", `${domain}.ts`);
+					let existingApisCode = "";
+					let existingModelsCode = "";
+					if (fs.existsSync(targetApisPath)) {
+						existingApisCode = fs.readFileSync(targetApisPath, "utf8");
+					}
+					if (fs.existsSync(targetModelsPath)) {
+						existingModelsCode = fs.readFileSync(targetModelsPath, "utf8");
+					}
 
-						let existingApisCode = "";
-						let existingModelsCode = "";
-						if (fs.existsSync(targetApisPath)) {
-							existingApisCode = fs.readFileSync(targetApisPath, "utf8");
-						}
-						if (fs.existsSync(targetModelsPath)) {
-							existingModelsCode = fs.readFileSync(targetModelsPath, "utf8");
-						}
+					const systemPromptForMulti = PROMPT_FOR_MULTI;
 
-						const systemPromptForMulti = PROMPT_FOR_MULTI;
+					const existingTypeNames = getTypeNamesFromCode(existingModelsCode);
 
-						const userPrompt = `
-다음 복수의 Swagger API 명세들을 바탕으로 모델/타입 파일(models)과 API 요청 파일(apis)을 생성하거나 기존 파일에 추가해줘.
+					const userPrompt = `
+다음 복수의 Swagger API 명세들을 바탕으로 모델/타입 파일(models)과 API 요청 파일(apis)에 추가될 개별 TypeScript 타입 및 함수 조각들을 생성해줘.
 도메인 명칭은 '${domain}' 입니다.
 
-${existingModelsCode ? `[기존 models/${domain}.ts 내용]\n이 타입들을 삭제하지 말고 그대로 유지하면서 새로운 API의 Payload/Response 타입들을 추가해줘:\n${existingModelsCode}\n` : ""}
-${existingApisCode ? `[기존 apis/${domain}.ts 내용]\n이 기존 메소드들과 임포트문들을 삭제하지 말고 그대로 유지하며 새 API 메소드들을 추가해줘:\n${existingApisCode}\n` : ""}
+${existingTypeNames.length > 0 ? `[주의: 이미 정의된 타입 목록 (이 이름들과 절대 중복되지 않게 신규 타입을 정의하거나 재사용하세요)]\n${existingTypeNames.join(", ")}\n` : ""}
 
-[새로 생성/추가해야 할 Swagger API 명세]
-${JSON.stringify(chunkSpecs, null, 2)}
+[새로 생성해야 할 Swagger API 명세]
+${JSON.stringify(domainSpecs, null, 2)}
 `;
 
-						let generatedCode;
-						const makeRequest = () =>
-							openai.chat.completions.create({
-								model: modelVal!,
-								messages: [
-									{ role: "system", content: systemPromptForMulti },
-									{ role: "user", content: userPrompt },
-								],
-								temperature: 0.1,
-							});
-
-						if (isInteractive) {
-							const s = p.spinner();
-							s.start(`🤖 AI 엔진을 통해 일괄 코드 생성 중... (${providerVal} - ${modelVal})`);
-							try {
-								const response = await callWithRetry(makeRequest);
-								generatedCode = response.choices[0].message?.content;
-								s.stop(`🤖 AI 코드 일괄 생성 완료!`);
-							} catch (error: any) {
-								s.stop(`❌ AI 코드 일괄 생성 실패!`);
-								p.log.error(`에러 내용: ${error.message}`);
-								failCount += chunk.length;
-								continue;
-							}
-						} else {
-							console.log(`🤖 AI 엔진을 통해 일괄 코드 생성 중... (${providerVal} - ${modelVal})`);
-							try {
-								const response = await callWithRetry(makeRequest);
-								generatedCode = response.choices[0].message?.content;
-							} catch (error: any) {
-								console.error(`❌ AI 코드 일괄 생성 실패! 에러 내용: ${error.message}`);
-								failCount += chunk.length;
-								continue;
-							}
+					let generatedCode;
+					const makeRequest = () => {
+						const params: any = {
+							model: modelVal!,
+							messages: [
+								{ role: "system", content: systemPromptForMulti },
+								{ role: "user", content: userPrompt },
+							],
+							temperature: 0.1,
+						};
+						if (providerVal !== "ollama") {
+							params.response_format = { type: "json_object" };
 						}
+						return openai.chat.completions.create(params);
+					};
 
-						if (!generatedCode) {
-							const errorMsg = "❌ 에러: AI가 코드를 생성하는 데 실패했습니다.";
-							if (isInteractive) {
-								p.log.error(errorMsg);
-							} else {
-								console.error(errorMsg);
-							}
-							failCount += chunk.length;
+					if (isInteractive) {
+						const s = p.spinner();
+						s.start(`🤖 AI 엔진을 통해 일괄 코드 생성 중... (${providerVal} - ${modelVal})`);
+						try {
+							const response = await callWithRetry(makeRequest);
+							generatedCode = response.choices[0].message?.content;
+							s.stop(`🤖 AI 코드 일괄 생성 완료!`);
+						} catch (error: any) {
+							s.stop(`❌ AI 코드 일괄 생성 실패!`);
+							p.log.error(`에러 내용: ${error.message}`);
+							failCount += domainPaths.length;
 							continue;
 						}
-
-						// 파일별 파싱 및 쓰기
-						const fileRegex = /--- FILE_START:\s*(models\/[\w\-]+\.ts|apis\/[\w\-]+\.ts)\s*---\r?\n([\s\S]*?)--- FILE_END ---/g;
-						let match;
-						let extractedCount = 0;
-						
-						const apisDir = path.join(process.cwd(), "src", "apis");
-						const modelsDir = path.join(process.cwd(), "src", "models");
-						if (!fs.existsSync(apisDir)) fs.mkdirSync(apisDir, { recursive: true });
-						if (!fs.existsSync(modelsDir)) fs.mkdirSync(modelsDir, { recursive: true });
-
-						while ((match = fileRegex.exec(generatedCode)) !== null) {
-							const relativePath = match[1].trim(); // e.g. "models/settlement.ts" or "apis/settlement.ts"
-							const fileCode = match[2]
-								.replace(/```typescript/g, "")
-								.replace(/```/g, "")
-								.trim();
-
-							const fullPath = path.join(process.cwd(), "src", relativePath);
-							fs.writeFileSync(fullPath, fileCode, "utf8");
-							successCount++;
-							extractedCount++;
-
-							if (isInteractive) {
-								p.log.success(`✨ 파일 생성/업데이트 성공: ${relativePath}`);
-							} else {
-								console.log(`✨ 파일 생성/업데이트 성공: ${relativePath}`);
-							}
+					} else {
+						console.log(`🤖 AI 엔진을 통해 일괄 코드 생성 중... (${providerVal} - ${modelVal})`);
+						try {
+							const response = await callWithRetry(makeRequest);
+							generatedCode = response.choices[0].message?.content;
+						} catch (error: any) {
+							console.error(`❌ AI 코드 일괄 생성 실패! 에러 내용: ${error.message}`);
+							failCount += domainPaths.length;
+							continue;
 						}
+					}
 
-						if (extractedCount === 0) {
-							failCount += chunk.length;
-							if (isInteractive) {
-								p.log.warn(`⚠️ 생성된 마커 포맷을 파싱할 수 없습니다. 출력 코드를 다시 확인하세요.`);
-							} else {
-								console.warn(`⚠️ 생성된 마커 포맷을 파싱할 수 없습니다. 출력 코드를 다시 확인하세요.`);
-							}
+					if (!generatedCode) {
+						const errorMsg = "❌ 에러: AI가 코드를 생성하는 데 실패했습니다.";
+						if (isInteractive) {
+							p.log.error(errorMsg);
+						} else {
+							console.error(errorMsg);
 						}
+						failCount += domainPaths.length;
+						continue;
+					}
 
-						if (c < chunks.length - 1 || domain !== domainList[domainList.length - 1]) {
-							// 연속적인 AI 그룹 호출을 방지하기 위한 안전 대기 딜레이
-							await new Promise((resolve) => setTimeout(resolve, 2000));
+					// JSON 파싱 및 파일 쓰기 (스마트 머지 엔진 연동)
+					let result: any = {};
+					try {
+						const rawContent = generatedCode.trim();
+						const jsonContent = rawContent.startsWith("```json")
+							? rawContent.substring(7, rawContent.length - 3).trim()
+							: rawContent.startsWith("```")
+							? rawContent.substring(3, rawContent.length - 3).trim()
+							: rawContent;
+							
+						result = JSON.parse(jsonContent);
+					} catch (e: any) {
+						const errorMsg = `❌ 에러: AI의 응답을 JSON 객체로 파싱하지 못했습니다.`;
+						if (isInteractive) {
+							p.log.error(errorMsg);
+						} else {
+							console.error(errorMsg);
 						}
+						failCount += domainPaths.length;
+						continue;
+					}
+
+					const apisDir = path.join(process.cwd(), "src", "apis");
+					const modelsDir = path.join(process.cwd(), "src", "models");
+					if (!fs.existsSync(apisDir)) fs.mkdirSync(apisDir, { recursive: true });
+					if (!fs.existsSync(modelsDir)) fs.mkdirSync(modelsDir, { recursive: true });
+
+					let extractedCount = 0;
+
+					if (result.models) {
+						const modelsPath = path.join(modelsDir, `${domain}.ts`);
+						const cleanModels = result.models
+							.replace(/```typescript/g, "")
+							.replace(/```/g, "")
+							.trim();
+						const finalModelsCode = mergeTypeScriptCode(existingModelsCode, cleanModels);
+						fs.writeFileSync(modelsPath, finalModelsCode, "utf8");
+						extractedCount++;
+						successCount++;
+						if (isInteractive) {
+							p.log.success(`✨ 파일 저장 성공: src/models/${domain}.ts`);
+						} else {
+							console.log(`✨ 파일 저장 성공: src/models/${domain}.ts`);
+						}
+					}
+					if (result.apis) {
+						const apisPath = path.join(apisDir, `${domain}.ts`);
+						const cleanApis = result.apis
+							.replace(/```typescript/g, "")
+							.replace(/```/g, "")
+							.trim();
+						const finalApisCode = mergeTypeScriptCode(existingApisCode, cleanApis);
+						fs.writeFileSync(apisPath, finalApisCode, "utf8");
+						extractedCount++;
+						successCount++;
+						if (isInteractive) {
+							p.log.success(`✨ 파일 저장 성공: src/apis/${domain}.ts`);
+						} else {
+							console.log(`✨ 파일 저장 성공: src/apis/${domain}.ts`);
+						}
+					}
+
+					if (extractedCount === 0) {
+						failCount += domainPaths.length;
+						if (isInteractive) {
+							p.log.warn(`⚠️ 생성된 JSON 포맷을 파싱할 수 없습니다. 출력 코드를 다시 확인하세요.`);
+						} else {
+							console.warn(`⚠️ 생성된 JSON 포맷을 파싱할 수 없습니다. 출력 코드를 다시 확인하세요.`);
+						}
+					}
+
+					if (domain !== domainList[domainList.length - 1]) {
+						// 연속적인 AI 그룹 호출을 방지하기 위한 안전 대기 딜레이 (LLM 공급자별 스마트 정책 적용)
+						await new Promise((resolve) => setTimeout(resolve, domainDelayMs));
 					}
 				}
 			} else {
@@ -660,27 +856,33 @@ ${JSON.stringify(chunkSpecs, null, 2)}
 					existingModelsCode = fs.readFileSync(targetModelsPath, "utf8");
 				}
 
+				const existingTypeNames = getTypeNamesFromCode(existingModelsCode);
+
 				const userPrompt = `
-다음 Swagger API 명세를 바탕으로 모델/타입 파일(models)과 API 요청 파일(apis)을 생성하거나 기존 파일에 추가해줘.
+다음 Swagger API 명세를 바탕으로 모델/타입 파일(models)과 API 요청 파일(apis)에 추가될 개별 TypeScript 타입 및 함수 조각들을 생성해줘.
 도메인 명칭은 '${domain}' 입니다.
 
-${existingModelsCode ? `[기존 models/${domain}.ts 내용]\n이 타입들을 삭제하지 말고 그대로 유지하면서 새로운 API의 Payload/Response 타입들을 추가해줘:\n${existingModelsCode}\n` : ""}
-${existingApisCode ? `[기존 apis/${domain}.ts 내용]\n이 기존 메소드들과 임포트문들을 삭제하지 말고 그대로 유지하며 새 API 메소드들을 추가해줘:\n${existingApisCode}\n` : ""}
+${existingTypeNames.length > 0 ? `[주의: 이미 정의된 타입 목록 (이 이름들과 절대 중복되지 않게 신규 타입을 정의하거나 재사용하세요)]\n${existingTypeNames.join(", ")}\n` : ""}
 
-[새로 생성/추가해야 할 Swagger API 명세]
+[새로 생성해야 할 Swagger API 명세]
 ${targetedSpec}
 `;
 
 				let generatedCode;
-				const makeRequest = () =>
-					openai.chat.completions.create({
+				const makeRequest = () => {
+					const params: any = {
 						model: modelVal!,
 						messages: [
 							{ role: "system", content: systemPrompt },
 							{ role: "user", content: userPrompt },
 						],
 						temperature: 0.1,
-					});
+					};
+					if (providerVal !== "ollama") {
+						params.response_format = { type: "json_object" };
+					}
+					return openai.chat.completions.create(params);
+				};
 
 				if (isInteractive) {
 					const s = p.spinner();
@@ -715,31 +917,62 @@ ${targetedSpec}
 					return;
 				}
 
-				// 파일별 파싱 및 쓰기
-				const fileRegex = /--- FILE_START:\s*(models\/[\w\-]+\.ts|apis\/[\w\-]+\.ts)\s*---\r?\n([\s\S]*?)--- FILE_END ---/g;
-				let match;
-				let extractedCount = 0;
+				// JSON 파싱 및 파일 쓰기 (스마트 머지 엔진 연동)
+				let result: any = {};
+				try {
+					const rawContent = generatedCode.trim();
+					const jsonContent = rawContent.startsWith("```json")
+						? rawContent.substring(7, rawContent.length - 3).trim()
+						: rawContent.startsWith("```")
+						? rawContent.substring(3, rawContent.length - 3).trim()
+						: rawContent;
+						
+					result = JSON.parse(jsonContent);
+				} catch (e: any) {
+					const errorMsg = "❌ 에러: AI 답변을 JSON 객체로 파싱하지 못했습니다.";
+					if (isInteractive) {
+						p.cancel(errorMsg);
+					} else {
+						console.error(errorMsg);
+					}
+					return;
+				}
 
 				const apisDir = path.join(process.cwd(), "src", "apis");
 				const modelsDir = path.join(process.cwd(), "src", "models");
 				if (!fs.existsSync(apisDir)) fs.mkdirSync(apisDir, { recursive: true });
 				if (!fs.existsSync(modelsDir)) fs.mkdirSync(modelsDir, { recursive: true });
 
-				while ((match = fileRegex.exec(generatedCode)) !== null) {
-					const relativePath = match[1].trim(); // e.g. "models/settlement.ts" or "apis/settlement.ts"
-					const fileCode = match[2]
+				let extractedCount = 0;
+
+				if (result.models) {
+					const modelsPath = path.join(modelsDir, `${domain}.ts`);
+					const cleanModels = result.models
 						.replace(/```typescript/g, "")
 						.replace(/```/g, "")
 						.trim();
-
-					const fullPath = path.join(process.cwd(), "src", relativePath);
-					fs.writeFileSync(fullPath, fileCode, "utf8");
+					const finalModelsCode = mergeTypeScriptCode(existingModelsCode, cleanModels);
+					fs.writeFileSync(modelsPath, finalModelsCode, "utf8");
 					extractedCount++;
-
 					if (isInteractive) {
-						p.log.success(`✨ 파일 저장 성공: src/${relativePath}`);
+						p.log.success(`✨ 파일 저장 성공: src/models/${domain}.ts`);
 					} else {
-						console.log(`✨ 파일 저장 성공: src/${relativePath}`);
+						console.log(`✨ 파일 저장 성공: src/models/${domain}.ts`);
+					}
+				}
+				if (result.apis) {
+					const apisPath = path.join(apisDir, `${domain}.ts`);
+					const cleanApis = result.apis
+						.replace(/```typescript/g, "")
+						.replace(/```/g, "")
+						.trim();
+					const finalApisCode = mergeTypeScriptCode(existingApisCode, cleanApis);
+					fs.writeFileSync(apisPath, finalApisCode, "utf8");
+					extractedCount++;
+					if (isInteractive) {
+						p.log.success(`✨ 파일 저장 성공: src/apis/${domain}.ts`);
+					} else {
+						console.log(`✨ 파일 저장 성공: src/apis/${domain}.ts`);
 					}
 				}
 
