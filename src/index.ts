@@ -180,6 +180,164 @@ function mergeTypeScriptCode(existingCode: string, newCode: string): string {
 	return `${mergedImportsStr}\n\n${mergedBody.trim()}\n\n${newParsed.body.trim()}`;
 }
 
+function stripCodeFence(code: string): string {
+	return code
+		.replace(/```typescript/g, "")
+		.replace(/```ts/g, "")
+		.replace(/```/g, "")
+		.trim();
+}
+
+function findDeclarationEnd(body: string, startIndex: number): number {
+	let openBraces = 0;
+	let hasBracedStarted = false;
+	for (let i = startIndex; i < body.length; i++) {
+		if (body[i] === "{") {
+			openBraces++;
+			hasBracedStarted = true;
+		} else if (body[i] === "}") {
+			openBraces--;
+			if (hasBracedStarted && openBraces === 0) {
+				return i + 1;
+			}
+		}
+		if (!hasBracedStarted && body[i] === ";" && openBraces === 0) {
+			return i + 1;
+		}
+	}
+	return body.length;
+}
+
+function parseNamedImportsFromPath(code: string, importPath: string): string[] {
+	const escapedPath = importPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const importRegex = new RegExp(`import\\s+type\\s+\\{([\\s\\S]*?)\\}\\s+from\\s+['"]${escapedPath}['"];?`, "g");
+	const members = new Set<string>();
+	let match;
+	while ((match = importRegex.exec(code)) !== null) {
+		match[1]
+			.split(",")
+			.map((item) => item.trim())
+			.filter(Boolean)
+			.forEach((item) => {
+				const aliasMatch = item.match(/^(\w+)\s+as\s+(\w+)$/);
+				if (aliasMatch) {
+					members.add(aliasMatch[2]);
+					return;
+				}
+				members.add(item);
+			});
+	}
+	return Array.from(members);
+}
+
+function parseNamedValueImportsFromPath(code: string, importPath: string): string[] {
+	const escapedPath = importPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const importRegex = new RegExp(`import\\s+\\{([\\s\\S]*?)\\}\\s+from\\s+['"]${escapedPath}['"];?`, "g");
+	const members = new Set<string>();
+	let match;
+	while ((match = importRegex.exec(code)) !== null) {
+		const rawImportStatement = match[0];
+		if (rawImportStatement.startsWith("import type")) {
+			continue;
+		}
+		match[1]
+			.split(",")
+			.map((item) => item.trim())
+			.filter(Boolean)
+			.forEach((item) => {
+				const aliasMatch = item.match(/^(\w+)\s+as\s+(\w+)$/);
+				if (aliasMatch) {
+					members.add(aliasMatch[2]);
+					return;
+				}
+				members.add(item);
+			});
+	}
+	return Array.from(members);
+}
+
+function hasIdentifierUsage(code: string, identifier: string): boolean {
+	const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`\\b${escaped}\\b`).test(code);
+}
+
+function extractApiNamespace(code: string, domain: string): string {
+	const importRegex = new RegExp(`import\\s+\\*\\s+as\\s+(\\w+)\\s+from\\s+['"]@/apis/${domain}['"];?`);
+	const match = code.match(importRegex);
+	return match?.[1] || domain;
+}
+
+function splitHookFileByHook(code: string, domain: string): Record<string, string> {
+	const source = stripCodeFence(code);
+	const exportConstRegex = /export\s+const\s+(\w+)\b/g;
+	const blocksByName = new Map<string, string>();
+	let match;
+	while ((match = exportConstRegex.exec(source)) !== null) {
+		const name = match[1];
+		const start = match.index;
+		const end = findDeclarationEnd(source, start);
+		blocksByName.set(name, source.slice(start, end).trim());
+	}
+
+	const modelImportPath = `@/models/${domain}`;
+	const modelTypeNames = parseNamedImportsFromPath(source, modelImportPath);
+	const tanstackMembers = parseNamedValueImportsFromPath(source, "@tanstack/react-query");
+	const apiNamespace = extractApiNamespace(source, domain);
+	const hookEntries: Record<string, string> = {};
+
+	for (const [name, hookBlock] of blocksByName) {
+		if (!/^use[A-Z]/.test(name)) continue;
+
+		const queryKeyRefs = Array.from(
+			new Set(Array.from(hookBlock.matchAll(/\b(get[A-Za-z0-9_]+QueryKey)\b/g)).map((m) => m[1])),
+		);
+		const queryKeyBlocks = queryKeyRefs
+			.map((queryKeyName) => blocksByName.get(queryKeyName))
+			.filter((block): block is string => Boolean(block));
+
+		const combinedBody = [...queryKeyBlocks, hookBlock].join("\n\n");
+		const tanstackImports = tanstackMembers.filter((member) => hasIdentifierUsage(combinedBody, member));
+
+		const usedTypes = modelTypeNames.filter((typeName) => hasIdentifierUsage(combinedBody, typeName));
+		const lines: string[] = [];
+
+		if (tanstackImports.length > 0) {
+			lines.push(`import { ${tanstackImports.join(", ")} } from '@tanstack/react-query';`);
+		}
+		if (usedTypes.length > 0) {
+			lines.push(`import type { ${usedTypes.join(", ")} } from '@/models/${domain}';`);
+		}
+		if (new RegExp(`\\b${apiNamespace}\\.`).test(combinedBody)) {
+			lines.push(`import * as ${apiNamespace} from '@/apis/${domain}';`);
+		}
+
+		hookEntries[name] = `${lines.join("\n")}\n\n${combinedBody}\n`;
+	}
+
+	return hookEntries;
+}
+
+function mergeDomainHookIndex(existingCode: string, hookNames: string[]): string {
+	const existing = existingCode || "";
+	const newLines = hookNames.map((hookName) => `export * from './${hookName}';`);
+	if (!existing.trim()) {
+		return `${newLines.join("\n")}\n`;
+	}
+
+	const resultLines = existing.replace(/\s+$/, "").split(/\r?\n/);
+	const existingExports = existing.match(/export\s+\*\s+from\s+['"]\.\/[^'"]+['"];?/g) || [];
+	const normalizedExistingSet = new Set(
+		existingExports.map((line) => line.replace(/\s+/g, " ").replace(/;$/, "").trim()),
+	);
+	for (const line of newLines) {
+		const normalizedLine = line.replace(/\s+/g, " ").replace(/;$/, "").trim();
+		if (!normalizedExistingSet.has(normalizedLine)) {
+			resultLines.push(line);
+		}
+	}
+	return `${resultLines.join("\n")}\n`;
+}
+
 const program = new Command();
 
 program.name("gen-rq").description("Swagger 명세를 기반으로 TypeScript Interface와 TanStack Query 훅을 자동 생성합니다.").version("1.1.0");
@@ -660,7 +818,6 @@ program
 					// 기존 파일 로드 (병합용)
 					const targetApisPath = path.join(process.cwd(), "src", "apis", `${domain}.ts`);
 					const targetModelsPath = path.join(process.cwd(), "src", "models", `${domain}.ts`);
-
 					let existingApisCode = "";
 					let existingModelsCode = "";
 					if (fs.existsSync(targetApisPath)) {
@@ -760,8 +917,10 @@ ${JSON.stringify(domainSpecs, null, 2)}
 
 					const apisDir = path.join(process.cwd(), "src", "apis");
 					const modelsDir = path.join(process.cwd(), "src", "models");
+					const hooksDir = path.join(process.cwd(), "src", "hooks");
 					if (!fs.existsSync(apisDir)) fs.mkdirSync(apisDir, { recursive: true });
 					if (!fs.existsSync(modelsDir)) fs.mkdirSync(modelsDir, { recursive: true });
+					if (!fs.existsSync(hooksDir)) fs.mkdirSync(hooksDir, { recursive: true });
 
 					let extractedCount = 0;
 
@@ -795,6 +954,41 @@ ${JSON.stringify(domainSpecs, null, 2)}
 							p.log.success(`✨ 파일 저장 성공: src/apis/${domain}.ts`);
 						} else {
 							console.log(`✨ 파일 저장 성공: src/apis/${domain}.ts`);
+						}
+					}
+					if (result.hooks) {
+						const hookFileMap = splitHookFileByHook(result.hooks, domain);
+						const hookNames = Object.keys(hookFileMap);
+						if (hookNames.length > 0) {
+							const domainHooksDir = path.join(hooksDir, domain);
+							if (!fs.existsSync(domainHooksDir)) {
+								fs.mkdirSync(domainHooksDir, { recursive: true });
+							}
+
+							for (const hookName of hookNames) {
+								const hookPath = path.join(domainHooksDir, `${hookName}.ts`);
+								fs.writeFileSync(hookPath, hookFileMap[hookName], "utf8");
+								if (isInteractive) {
+									p.log.success(`✨ 파일 저장 성공: src/hooks/${domain}/${hookName}.ts`);
+								} else {
+									console.log(`✨ 파일 저장 성공: src/hooks/${domain}/${hookName}.ts`);
+								}
+							}
+
+							const domainIndexPath = path.join(domainHooksDir, "index.ts");
+							const existingDomainIndexCode = fs.existsSync(domainIndexPath)
+								? fs.readFileSync(domainIndexPath, "utf8")
+								: "";
+							const mergedDomainIndexCode = mergeDomainHookIndex(existingDomainIndexCode, hookNames);
+							fs.writeFileSync(domainIndexPath, mergedDomainIndexCode, "utf8");
+							if (isInteractive) {
+								p.log.success(`✨ 파일 저장 성공: src/hooks/${domain}/index.ts`);
+							} else {
+								console.log(`✨ 파일 저장 성공: src/hooks/${domain}/index.ts`);
+							}
+
+							extractedCount++;
+							successCount++;
 						}
 					}
 
@@ -846,7 +1040,6 @@ ${JSON.stringify(domainSpecs, null, 2)}
 
 				const targetApisPath = path.join(process.cwd(), "src", "apis", `${domain}.ts`);
 				const targetModelsPath = path.join(process.cwd(), "src", "models", `${domain}.ts`);
-
 				let existingApisCode = "";
 				let existingModelsCode = "";
 				if (fs.existsSync(targetApisPath)) {
@@ -940,8 +1133,10 @@ ${targetedSpec}
 
 				const apisDir = path.join(process.cwd(), "src", "apis");
 				const modelsDir = path.join(process.cwd(), "src", "models");
+				const hooksDir = path.join(process.cwd(), "src", "hooks");
 				if (!fs.existsSync(apisDir)) fs.mkdirSync(apisDir, { recursive: true });
 				if (!fs.existsSync(modelsDir)) fs.mkdirSync(modelsDir, { recursive: true });
+				if (!fs.existsSync(hooksDir)) fs.mkdirSync(hooksDir, { recursive: true });
 
 				let extractedCount = 0;
 
@@ -973,6 +1168,40 @@ ${targetedSpec}
 						p.log.success(`✨ 파일 저장 성공: src/apis/${domain}.ts`);
 					} else {
 						console.log(`✨ 파일 저장 성공: src/apis/${domain}.ts`);
+					}
+				}
+				if (result.hooks) {
+					const hookFileMap = splitHookFileByHook(result.hooks, domain);
+					const hookNames = Object.keys(hookFileMap);
+					if (hookNames.length > 0) {
+						const domainHooksDir = path.join(hooksDir, domain);
+						if (!fs.existsSync(domainHooksDir)) {
+							fs.mkdirSync(domainHooksDir, { recursive: true });
+						}
+
+						for (const hookName of hookNames) {
+							const hookPath = path.join(domainHooksDir, `${hookName}.ts`);
+							fs.writeFileSync(hookPath, hookFileMap[hookName], "utf8");
+							if (isInteractive) {
+								p.log.success(`✨ 파일 저장 성공: src/hooks/${domain}/${hookName}.ts`);
+							} else {
+								console.log(`✨ 파일 저장 성공: src/hooks/${domain}/${hookName}.ts`);
+							}
+						}
+
+						const domainIndexPath = path.join(domainHooksDir, "index.ts");
+						const existingDomainIndexCode = fs.existsSync(domainIndexPath)
+							? fs.readFileSync(domainIndexPath, "utf8")
+							: "";
+						const mergedDomainIndexCode = mergeDomainHookIndex(existingDomainIndexCode, hookNames);
+						fs.writeFileSync(domainIndexPath, mergedDomainIndexCode, "utf8");
+						if (isInteractive) {
+							p.log.success(`✨ 파일 저장 성공: src/hooks/${domain}/index.ts`);
+						} else {
+							console.log(`✨ 파일 저장 성공: src/hooks/${domain}/index.ts`);
+						}
+
+						extractedCount++;
 					}
 				}
 
