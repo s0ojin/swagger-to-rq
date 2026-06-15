@@ -340,7 +340,7 @@ function mergeDomainHookIndex(existingCode: string, hookNames: string[]): string
 
 const program = new Command();
 
-program.name("gen-rq").description("Swagger 명세를 기반으로 TypeScript Interface와 TanStack Query 훅을 자동 생성합니다.").version("1.1.0");
+program.name("gen-rq").description("Swagger 명세를 기반으로 TypeScript Interface와 TanStack Query 훅을 자동 생성합니다.").version("1.2.1");
 
 program
 	.argument("[apiPath]", "변환할 API 엔드포인트 경로 (예: /api/v1/user/search)")
@@ -351,6 +351,7 @@ program
 	.option("-b, --base-url <url>", "LLM API Base URL (커스텀 엔드포인트)")
 	.option("-t, --type <string>", "강제 지정 타입 선택 (query 또는 mutation)")
 	.option("-a, --all", "Swagger JSON의 모든 API 경로에 대해 코드를 생성합니다.")
+	.option("-d, --domain <string>", "도메인명을 직접 강제 지정합니다.")
 	.action(async (apiPath: string | undefined, options) => {
 		const isInteractive = !apiPath;
 
@@ -361,6 +362,7 @@ program
 		let apiKeyVal = options.key;
 		let baseURLVal = options.baseUrl;
 		let modelVal = options.model;
+		let domainVal = options.domain;
 
 		if (isInteractive) {
 			p.intro(`✨ swagger-to-rq (gen-rq) CLI ✨`);
@@ -787,15 +789,94 @@ program
 				return domain;
 			};
 
-			if (options.all) {
-				// 도메인별 그룹핑
-				const domainGroups: Record<string, string[]> = {};
-				for (const p of pathsToProcess) {
-					const domain = getDomainFromPath(p);
-					if (!domainGroups[domain]) {
-						domainGroups[domain] = [];
+			const getCandidatesFromPath = (pathStr: string): string[] => {
+				const segments = pathStr.split("/").filter(Boolean);
+				const vIndex = segments.findIndex(seg => /^v\d+$/.test(seg));
+				const startIndex = vIndex !== -1 ? vIndex + 1 : 0;
+				return segments.slice(startIndex, startIndex + 2);
+			};
+
+			const promptDomainSelection = async (pathStr: string, labelPrefix: string): Promise<string> => {
+				const candidates = getCandidatesFromPath(pathStr);
+				const defaultDomain = getDomainFromPath(pathStr);
+				const options = candidates.length > 0 ? candidates : [defaultDomain];
+				const uniqueOptions = Array.from(new Set(options));
+
+				const domainSelect = await p.select({
+					message: `${labelPrefix} 사용할 도메인을 선택하세요`,
+					options: [
+						...uniqueOptions.map(c => ({ value: c, label: c })),
+						{ value: "custom", label: "직접 입력..." }
+					],
+					initialValue: uniqueOptions[0]
+				});
+
+				if (p.isCancel(domainSelect)) {
+					p.cancel("작업이 취소되었습니다.");
+					process.exit(0);
+				}
+
+				if (domainSelect === "custom") {
+					const customDomain = await p.text({
+						message: "도메인명을 직접 입력하세요",
+						validate(value) {
+							if (!value) return "도메인명은 필수입니다.";
+						}
+					});
+					if (p.isCancel(customDomain)) {
+						p.cancel("작업이 취소되었습니다.");
+						process.exit(0);
 					}
-					domainGroups[domain].push(p);
+					return customDomain as string;
+				}
+
+				return domainSelect as string;
+			};
+
+			if (options.all) {
+				// 태그별 그룹핑
+				const tagGroups: Record<string, string[]> = {};
+				for (const p of pathsToProcess) {
+					const pathSpec = swaggerJson.paths?.[p];
+					if (!pathSpec) continue;
+					const methods = Object.keys(pathSpec);
+					let tag = "common";
+					for (const m of methods) {
+						const op = pathSpec[m];
+						if (op && op.tags && op.tags.length > 0) {
+							tag = op.tags[0];
+							break;
+						}
+					}
+					if (!tagGroups[tag]) {
+						tagGroups[tag] = [];
+					}
+					tagGroups[tag].push(p);
+				}
+
+				const tagDomains: Record<string, string> = {};
+				for (const tag of Object.keys(tagGroups)) {
+					const firstPath = tagGroups[tag][0];
+					if (domainVal) {
+						tagDomains[tag] = domainVal;
+					} else if (isInteractive) {
+						tagDomains[tag] = await promptDomainSelection(
+							firstPath,
+							`태그 [${tag}] (${tagGroups[tag].length}개 API)의`
+						);
+					} else {
+						tagDomains[tag] = getDomainFromPath(firstPath);
+					}
+				}
+
+				// 도메인별 그룹핑으로 재구성
+				const domainGroups: Record<string, string[]> = {};
+				for (const tag of Object.keys(tagGroups)) {
+					const mappedDomain = tagDomains[tag];
+					if (!domainGroups[mappedDomain]) {
+						domainGroups[mappedDomain] = [];
+					}
+					domainGroups[mappedDomain].push(...tagGroups[tag]);
 				}
 
 				const domainList = Object.keys(domainGroups);
@@ -1009,7 +1090,14 @@ ${JSON.stringify(domainSpecs, null, 2)}
 			} else {
 				// 단일 API 처리 모드
 				const currentPath = pathsToProcess[0];
-				const domain = getDomainFromPath(currentPath);
+				let domain: string;
+				if (domainVal) {
+					domain = domainVal;
+				} else if (isInteractive) {
+					domain = await promptDomainSelection(currentPath, `API 경로 [${currentPath}]의`);
+				} else {
+					domain = getDomainFromPath(currentPath);
+				}
 
 				if (isInteractive) {
 					p.log.step(`🔍 API 경로 [${currentPath}] 탐색 및 명세 추출 중...`);

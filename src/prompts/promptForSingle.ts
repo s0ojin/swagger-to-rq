@@ -28,11 +28,13 @@ export const PROMPT_FOR_SINGLE = `
   - authApi는 반드시 \`import { authApi } from '@/apis/instance';\` 또는 \`import { authApi } from './instance';\` 로 임포트하세요.
   - models 파일의 타입들은 \`import type { ... } from '@/models/[domain]';\` 로 임포트하세요.
   - API URL은 Swagger 명세의 URL 경로(문자열 리터럴)를 직접 사용하세요 (예: \`authApi.post('/api/admin/v1/settlement/list', payload)\`).
-  - 단, 만약 기존 코드에 constants에서 URL을 임포트하는 형태(\`SETTLEMENT_API_URLS.SETTLEMENT_LIST\`)가 있다면 기존 패턴을 유지하여 똑같이 작성하고, 그렇지 않은 경우 문자열 리터럴 경로를 사용하세요.
 
 [3. "hooks" 키에 제공할 TypeScript 규격]
 - TanStack Query (React Query v5) 커스텀 훅을 생성하세요.
-- Naming Convention: use[기능명] (예: useSettlementList, useSettlementDetail)
+- Naming Convention:
+  - Query 훅: use[기능명] (예: useSettlementList, useSettlementDetail)
+  - Mutation 훅: use[기능명]Mutation (예: useSettlementExcelLaunchMutation)
+  - 중요: useQuery와 useMutation을 막론하고 모든 훅의 이름에서 'Post', 'Get', 'Put', 'Delete' 등 HTTP 메서드 접두사는 완전히 배제하십시오. (예: usePostTermRead -> useTermRead, usePostSettlementExcelLaunch -> useSettlementExcelLaunchMutation)
 - 생성기의 후처리 로직은 hooks 문자열에서 \`export const useXxx\` 패턴을 기준으로 개별 훅 파일을 분리합니다. 따라서 모든 훅은 반드시 \`export const useXxx = ...\` 형태의 최상위 선언으로 작성하세요.
 - Query Hook의 Query Key 함수는 반드시 해당 Hook 바로 위에 \`export const getXxxQueryKey = ...\` 형태로 작성하세요. 예: \`useSettlementList\` 훅이면 \`getSettlementListQueryKey\`.
 - 여러 훅을 하나의 hooks 문자열 안에 생성하더라도, 각 훅은 독립적으로 분리 가능한 구조여야 합니다. 훅끼리 내부 함수나 지역 변수를 공유하지 말고, 각 훅에서 필요한 타입과 API 함수만 사용하세요.
@@ -67,7 +69,7 @@ export const PROMPT_FOR_SINGLE = `
     \`\`\`
 - mutation일경우 (useMutation 훅을 생성할 때) 예시:
   \`\`\`typescript
-  export const usePostSettlementExcelLaunch = () => {
+  export const useSettlementExcelLaunchMutation = () => {
     return useMutation({
       mutationFn: (payload: SettlementExcelLaunchPayload) => settlement.postSettlementExcelLaunch(payload),
     });
