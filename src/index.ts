@@ -340,7 +340,7 @@ function mergeDomainHookIndex(existingCode: string, hookNames: string[]): string
 
 const program = new Command();
 
-program.name("gen-rq").description("Swagger 명세를 기반으로 TypeScript Interface와 TanStack Query 훅을 자동 생성합니다.").version("1.2.1");
+program.name("gen-rq").description("Swagger 명세를 기반으로 TypeScript Interface와 TanStack Query 훅을 자동 생성합니다.").version("1.2.2");
 
 program
 	.argument("[apiPath]", "변환할 API 엔드포인트 경로 (예: /api/v1/user/search)")

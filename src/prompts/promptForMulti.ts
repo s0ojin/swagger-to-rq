@@ -19,15 +19,17 @@ export const PROMPT_FOR_MULTI = `
 - 절대 'any' 타입을 사용하지 마세요. 모든 필드는 명확한 타입(string, number, boolean, 혹은 하위 interface)으로 정의되어야 합니다.
 
 [2. "apis" 키에 제공할 TypeScript 규격]
-- authApi 인스턴스를 사용하여 POST/GET 등의 요청을 처리하는 API 함수들을 개별적으로 export 하세요.
+- API 명세의 보안 정의(security) 여부에 따라 authApi 또는 publicApi 인스턴스를 선택하여 POST/GET 등의 요청을 처리하는 API 함수들을 개별적으로 export 하세요.
+  - Swagger 명세(각 endpoint 스펙)에 security 필드가 존재하거나 비어있지 않은 경우(인증 필요/자물쇠 잠김): authApi 인스턴스를 사용하세요.
+  - Swagger 명세에 security 필드가 없거나 비어있는 경우(인증 불필요/자물쇠 열림): publicApi 인스턴스를 사용하세요.
 - Naming Convention: 각 API 요청 함수들을 개별적으로 export 하세요. (예: export const getSettlementList = async (...) => { ... })
 - 개별 API 함수 명명 규칙:
   - get[기능명] (예: getSettlementList, getSettlementDetail)
   - post[기능명] 또는 put[기능명], delete[기능명] (예: postSettlementExcelLaunch)
 - 가져오기 규칙:
-  - authApi는 반드시 \`import { authApi } from '@/apis/instance';\` 또는 \`import { authApi } from './instance';\` 로 임포트하세요.
+  - 사용하는 인스턴스에 맞게 \`import { authApi } from '@/apis/instance';\` 또는 \`import { publicApi } from '@/apis/instance';\` (혹은 \`./instance\`) 로 임포트하세요. 둘 다 사용되는 경우 \`{ authApi, publicApi }\` 형태로 함께 임포트하세요.
   - models 파일의 타입들은 \`import type { ... } from '@/models/[domain]';\` 로 임포트하세요.
-  - API URL은 Swagger 명세의 URL 경로(문자열 리터럴)를 직접 사용하세요 (예: \`authApi.post('/api/admin/v1/settlement/list', payload)\`).
+  - API URL은 Swagger 명세의 URL 경로(문자열 리터럴)를 직접 사용하세요 (예: \`authApi.post('/api/admin/v1/settlement/list', payload)\` 혹은 \`publicApi.post(...)\`).
 
 [3. "hooks" 키에 제공할 TypeScript 규격]
 - TanStack Query (React Query v5) 커스텀 훅을 생성하세요.
