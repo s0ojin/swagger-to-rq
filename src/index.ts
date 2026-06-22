@@ -99,7 +99,10 @@ function extractImports(code: string): { imports: { path: string; members: strin
 		// { A, B } 형태 파싱
 		const memberMatch = importClause.match(/\{([\s\S]*?)\}/);
 		if (memberMatch) {
-			const members = memberMatch[1].split(",").map(m => m.trim()).filter(Boolean);
+			const members = memberMatch[1]
+				.split(",")
+				.map((m) => m.trim())
+				.filter(Boolean);
 			imports.push({ path: importPath, members, isType });
 		}
 	}
@@ -114,7 +117,7 @@ function extractImports(code: string): { imports: { path: string; members: strin
 // 4. 모아진 Import 정보들을 중복 제거 및 경로별 정렬하여 한 줄씩 생성
 function mergeImports(
 	existingImports: { path: string; members: string[]; isType: boolean }[],
-	newImports: { path: string; members: string[]; isType: boolean }[]
+	newImports: { path: string; members: string[]; isType: boolean }[],
 ): string {
 	const merged: Record<string, { typeMembers: Set<string>; valueMembers: Set<string> }> = {};
 
@@ -122,7 +125,7 @@ function mergeImports(
 		if (!merged[imp.path]) {
 			merged[imp.path] = { typeMembers: new Set(), valueMembers: new Set() };
 		}
-		imp.members.forEach(m => {
+		imp.members.forEach((m) => {
 			if (imp.isType) {
 				merged[imp.path].typeMembers.add(m);
 			} else {
@@ -288,9 +291,7 @@ function splitHookFileByHook(code: string, domain: string): Record<string, strin
 	for (const [name, hookBlock] of blocksByName) {
 		if (!/^use[A-Z]/.test(name)) continue;
 
-		const queryKeyRefs = Array.from(
-			new Set(Array.from(hookBlock.matchAll(/\b(get[A-Za-z0-9_]+QueryKey)\b/g)).map((m) => m[1])),
-		);
+		const queryKeyRefs = Array.from(new Set(Array.from(hookBlock.matchAll(/\b(get[A-Za-z0-9_]+QueryKey)\b/g)).map((m) => m[1])));
 		const queryKeyBlocks = queryKeyRefs
 			.map((queryKeyName) => blocksByName.get(queryKeyName))
 			.filter((block): block is string => Boolean(block));
@@ -326,9 +327,7 @@ function mergeDomainHookIndex(existingCode: string, hookNames: string[]): string
 
 	const resultLines = existing.replace(/\s+$/, "").split(/\r?\n/);
 	const existingExports = existing.match(/export\s+\*\s+from\s+['"]\.\/[^'"]+['"];?/g) || [];
-	const normalizedExistingSet = new Set(
-		existingExports.map((line) => line.replace(/\s+/g, " ").replace(/;$/, "").trim()),
-	);
+	const normalizedExistingSet = new Set(existingExports.map((line) => line.replace(/\s+/g, " ").replace(/;$/, "").trim()));
 	for (const line of newLines) {
 		const normalizedLine = line.replace(/\s+/g, " ").replace(/;$/, "").trim();
 		if (!normalizedExistingSet.has(normalizedLine)) {
@@ -340,13 +339,13 @@ function mergeDomainHookIndex(existingCode: string, hookNames: string[]): string
 
 const program = new Command();
 
-program.name("gen-rq").description("Swagger 명세를 기반으로 TypeScript Interface와 TanStack Query 훅을 자동 생성합니다.").version("1.2.2");
+program.name("gen-rq").description("Swagger 명세를 기반으로 TypeScript Interface와 TanStack Query 훅을 자동 생성합니다.").version("1.2.3");
 
 program
 	.argument("[apiPath]", "변환할 API 엔드포인트 경로 (예: /api/v1/user/search)")
 	.option("-s, --swagger <url>", "회사의 Swagger JSON URL 주소")
 	.option("-p, --provider <string>", "사용할 LLM 공급자 (ollama, openai, gemini)", "ollama")
-	.option("-m, --model <string>", "사용할 LLM 모델명 (예: qwen2.5-coder:7b, gpt-4o-mini 등)")
+	.option("-m, --model <string>", "사용할 LLM 모델명 (예: qwen3:4b, gpt-5.4-mini 등)")
 	.option("-k, --key <string>", "LLM API Key")
 	.option("-b, --base-url <url>", "LLM API Base URL (커스텀 엔드포인트)")
 	.option("-t, --type <string>", "강제 지정 타입 선택 (query 또는 mutation)")
@@ -366,6 +365,11 @@ program
 
 		if (isInteractive) {
 			p.intro(`✨ swagger-to-rq (gen-rq) CLI ✨`);
+			p.note(
+				`Ollama(로컬 LLM) 및 OpenAI API(유료)는 입력 데이터를 학습에 활용하지 않아 보안상 안전합니다.\n` +
+					`다만, Gemini Free 등 일부 무료 API 모델 사용 시 데이터가 학습에 이용될 수 있으니 사내 보안 규정에 유의하세요.`,
+				`🔒 사내망 데이터 보안 가이드`,
+			);
 
 			const steps = [];
 			if (!options.all) {
@@ -428,7 +432,7 @@ program
 						message: "사용할 LLM 공급자(Provider)를 선택하세요",
 						options: [
 							{ value: "ollama", label: "Ollama (로컬 LLM - 무료 & 보안 안심)" },
-							{ value: "openai", label: "OpenAI (GPT-4o-mini 등)" },
+							{ value: "openai", label: "OpenAI (gpt-5.4-mini 등)" },
 							{ value: "gemini", label: "Google Gemini (gemini-3.5-flash 등)" },
 							{ value: "custom", label: "Custom (기타 OpenAI 호환 API)" },
 							{ value: "back", label: "◀ 이전 단계로 돌아가기 (Swagger URL 입력으로)" },
@@ -454,8 +458,8 @@ program
 
 						const ollamaModelInput = await p.text({
 							message: "사용할 Ollama 모델명을 입력하세요 ('..' 입력 시 이전 단계로)",
-							placeholder: "qwen2.5-coder:7b",
-							initialValue: modelVal || process.env.OLLAMA_MODEL || "qwen2.5-coder:7b",
+							placeholder: "qwen3:4b",
+							initialValue: modelVal || process.env.OLLAMA_MODEL || "qwen3:4b",
 							validate(value) {
 								if (!value) return "모델명은 필수 입력 항목입니다.";
 							},
@@ -507,8 +511,8 @@ program
 
 							const openaiModelInput = await p.text({
 								message: "사용할 OpenAI 모델명을 입력하세요 ('..' 입력 시 이전 단계로)",
-								placeholder: "gpt-4o-mini",
-								initialValue: modelVal || process.env.OPENAI_MODEL || "gpt-4o-mini",
+								placeholder: "gpt-5.4-mini",
+								initialValue: modelVal || process.env.OPENAI_MODEL || "gpt-5.4-mini",
 								validate(value) {
 									if (!value) return "모델명은 필수 입력 항목입니다.";
 								},
@@ -599,7 +603,7 @@ program
 							const customModelInput = await p.text({
 								message: "사용할 모델명을 입력하세요 ('..' 입력 시 이전 단계로)",
 								placeholder: "deepseek-chat",
-								initialValue: modelVal || process.env.LLM_MODEL || "gpt-4o-mini",
+								initialValue: modelVal || process.env.LLM_MODEL || "gpt-5.4-mini",
 								validate(value) {
 									if (!value) return "모델명은 필수 입력 항목입니다.";
 								},
@@ -651,11 +655,11 @@ program
 			if (provider === "ollama") {
 				apiKeyVal = apiKeyVal || "ollama";
 				baseURLVal = baseURLVal || process.env.OLLAMA_BASE_URL || "http://localhost:11434/v1";
-				modelVal = modelVal || process.env.OLLAMA_MODEL || "qwen2.5-coder:7b";
+				modelVal = modelVal || process.env.OLLAMA_MODEL || "qwen3:4b";
 			} else if (provider === "openai") {
 				apiKeyVal = apiKeyVal || process.env.OPENAI_API_KEY;
 				baseURLVal = baseURLVal || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-				modelVal = modelVal || process.env.OPENAI_MODEL || "gpt-4o-mini";
+				modelVal = modelVal || process.env.OPENAI_MODEL || "gpt-5.4-mini";
 			} else if (provider === "gemini") {
 				apiKeyVal = apiKeyVal || process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY;
 				baseURLVal = baseURLVal || process.env.GEMINI_BASE_URL || "https://generativelanguage.googleapis.com/v1beta/openai/";
@@ -663,7 +667,7 @@ program
 			} else {
 				apiKeyVal = apiKeyVal || process.env.LLM_API_KEY;
 				baseURLVal = baseURLVal || process.env.LLM_BASE_URL;
-				modelVal = modelVal || process.env.LLM_MODEL || "gpt-4o-mini";
+				modelVal = modelVal || process.env.LLM_MODEL || "gpt-5.4-mini";
 			}
 
 			// 수동 옵션 오타 검증
@@ -685,6 +689,12 @@ program
 			if (!options.all && !apiPathVal) {
 				console.error("❌ 에러: 변환할 API 엔드포인트 경로가 입력되지 않았습니다. 또는 --all 옵션을 사용하세요.");
 				return;
+			}
+
+			if (providerVal.toLowerCase() === "gemini") {
+				console.warn(
+					"⚠️ [보안 경고] Gemini Free API 사용 시 입력 데이터가 모델 학습에 활용될 수 있으니 사내 보안 가이드에 주의하십시오. (Ollama 로컬 모델 권장)",
+				);
 			}
 		}
 
@@ -776,7 +786,7 @@ program
 			// 도메인 추출 헬퍼 함수
 			const getDomainFromPath = (pathStr: string): string => {
 				const segments = pathStr.split("/").filter(Boolean);
-				const vIndex = segments.findIndex(seg => /^v\d+$/.test(seg));
+				const vIndex = segments.findIndex((seg) => /^v\d+$/.test(seg));
 				let domain = "common";
 				if (vIndex !== -1 && segments[vIndex + 1]) {
 					domain = segments[vIndex + 1];
@@ -791,7 +801,7 @@ program
 
 			const getCandidatesFromPath = (pathStr: string): string[] => {
 				const segments = pathStr.split("/").filter(Boolean);
-				const vIndex = segments.findIndex(seg => /^v\d+$/.test(seg));
+				const vIndex = segments.findIndex((seg) => /^v\d+$/.test(seg));
 				const startIndex = vIndex !== -1 ? vIndex + 1 : 0;
 				return segments.slice(startIndex, startIndex + 2);
 			};
@@ -804,11 +814,8 @@ program
 
 				const domainSelect = await p.select({
 					message: `${labelPrefix} 사용할 도메인을 선택하세요`,
-					options: [
-						...uniqueOptions.map(c => ({ value: c, label: c })),
-						{ value: "custom", label: "직접 입력..." }
-					],
-					initialValue: uniqueOptions[0]
+					options: [...uniqueOptions.map((c) => ({ value: c, label: c })), { value: "custom", label: "직접 입력..." }],
+					initialValue: uniqueOptions[0],
 				});
 
 				if (p.isCancel(domainSelect)) {
@@ -821,7 +828,7 @@ program
 						message: "도메인명을 직접 입력하세요",
 						validate(value) {
 							if (!value) return "도메인명은 필수입니다.";
-						}
+						},
 					});
 					if (p.isCancel(customDomain)) {
 						p.cancel("작업이 취소되었습니다.");
@@ -860,10 +867,7 @@ program
 					if (domainVal) {
 						tagDomains[tag] = domainVal;
 					} else if (isInteractive) {
-						tagDomains[tag] = await promptDomainSelection(
-							firstPath,
-							`태그 [${tag}] (${tagGroups[tag].length}개 API)의`
-						);
+						tagDomains[tag] = await promptDomainSelection(firstPath, `태그 [${tag}] (${tagGroups[tag].length}개 API)의`);
 					} else {
 						tagDomains[tag] = getDomainFromPath(firstPath);
 					}
@@ -981,9 +985,9 @@ ${JSON.stringify(domainSpecs, null, 2)}
 						const jsonContent = rawContent.startsWith("```json")
 							? rawContent.substring(7, rawContent.length - 3).trim()
 							: rawContent.startsWith("```")
-							? rawContent.substring(3, rawContent.length - 3).trim()
-							: rawContent;
-							
+								? rawContent.substring(3, rawContent.length - 3).trim()
+								: rawContent;
+
 						result = JSON.parse(jsonContent);
 					} catch (e: any) {
 						const errorMsg = `❌ 에러: AI의 응답을 JSON 객체로 파싱하지 못했습니다.`;
@@ -1057,9 +1061,7 @@ ${JSON.stringify(domainSpecs, null, 2)}
 							}
 
 							const domainIndexPath = path.join(domainHooksDir, "index.ts");
-							const existingDomainIndexCode = fs.existsSync(domainIndexPath)
-								? fs.readFileSync(domainIndexPath, "utf8")
-								: "";
+							const existingDomainIndexCode = fs.existsSync(domainIndexPath) ? fs.readFileSync(domainIndexPath, "utf8") : "";
 							const mergedDomainIndexCode = mergeDomainHookIndex(existingDomainIndexCode, hookNames);
 							fs.writeFileSync(domainIndexPath, mergedDomainIndexCode, "utf8");
 							if (isInteractive) {
@@ -1205,9 +1207,9 @@ ${targetedSpec}
 					const jsonContent = rawContent.startsWith("```json")
 						? rawContent.substring(7, rawContent.length - 3).trim()
 						: rawContent.startsWith("```")
-						? rawContent.substring(3, rawContent.length - 3).trim()
-						: rawContent;
-						
+							? rawContent.substring(3, rawContent.length - 3).trim()
+							: rawContent;
+
 					result = JSON.parse(jsonContent);
 				} catch (e: any) {
 					const errorMsg = "❌ 에러: AI 답변을 JSON 객체로 파싱하지 못했습니다.";
@@ -1278,9 +1280,7 @@ ${targetedSpec}
 						}
 
 						const domainIndexPath = path.join(domainHooksDir, "index.ts");
-						const existingDomainIndexCode = fs.existsSync(domainIndexPath)
-							? fs.readFileSync(domainIndexPath, "utf8")
-							: "";
+						const existingDomainIndexCode = fs.existsSync(domainIndexPath) ? fs.readFileSync(domainIndexPath, "utf8") : "";
 						const mergedDomainIndexCode = mergeDomainHookIndex(existingDomainIndexCode, hookNames);
 						fs.writeFileSync(domainIndexPath, mergedDomainIndexCode, "utf8");
 						if (isInteractive) {
@@ -1333,7 +1333,7 @@ ${targetedSpec}
 			if (providerVal === "ollama" && (error.code === "ECONNREFUSED" || error.message?.includes("fetch"))) {
 				console.error("💡 [Ollama 연결 실패] 로컬 Ollama 엔진이 실행 중인지 확인하세요!");
 				console.error("   1. Ollama 앱이 켜져 있는지 확인 (트레이 아이콘)");
-				console.error("   2. 터미널에 'ollama run qwen2.5-coder:7b' 가 정상 구동 중인지 확인");
+				console.error("   2. 터미널에 'ollama run qwen3:4b' 가 정상 구동 중인지 확인");
 			} else if (!isInteractive) {
 				console.error(`📝 에러 내용: ${error.message}`);
 			}
